@@ -12,7 +12,9 @@ import { useEffect, useRef, useCallback } from 'react';
 import { useBoardStore } from '../store/boardStore';
 import { ServerMessage, QueuedOperation } from '../types';
 
-const WS_URL = import.meta.env.VITE_WS_URL || `ws://${window.location.hostname}:4000`;
+const WS_URL =
+  import.meta.env.VITE_WS_URL ||
+  `${window.location.protocol === 'https:' ? 'wss' : 'ws'}://${window.location.host}`;
 
 const MAX_RECONNECT_DELAY = 30_000;
 const INITIAL_RECONNECT_DELAY = 1_000;

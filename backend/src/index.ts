@@ -48,6 +48,16 @@ async function main(): Promise<void> {
   const taskRoutes = (await import('./routes/tasks')).default;
   app.use('/api', taskRoutes);
 
+  // Serve frontend in production (copied to dist/public during build)
+  const publicDir = path.join(__dirname, 'public');
+  if (fs.existsSync(publicDir)) {
+    app.use(express.static(publicDir));
+    app.get('*', (_req, res) => {
+      res.sendFile(path.join(publicDir, 'index.html'));
+    });
+    console.log(`[server] Serving frontend from ${publicDir}`);
+  }
+
   const server = http.createServer(app);
 
   const { attachWebSocketServer } = await import('./websocket/wsServer');
