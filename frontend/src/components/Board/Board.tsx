@@ -1,19 +1,14 @@
 /**
  * Board — root drag-and-drop container.
  *
- * Multi-column DnD pattern (dnd-kit):
- *  - onDragStart: snapshot current task groups into `dragItems` local state
- *  - onDragOver:  update `dragItems` to move the active task to the hovered
- *                 column immediately → smooth cross-column visual feedback
- *  - onDragEnd:   read final position from `dragItems`, send MOVE_TASK to
- *                 server, clear `dragItems` (Zustand store takes over again)
- *
- * Real-time sync:
- *  - TASK_CREATED from other users is now added via fixed confirmTaskCreated
- *  - TASK_UPDATED / TASK_MOVED / TASK_DELETED propagate to all clients
+ * Key fix: drag callbacks (onDragOver / onDragEnd) read from a ref
+ * (dragStateRef) instead of closed-over state values.  React state is
+ * updated asynchronously so closures over `dragItems` become stale the
+ * moment the first setDragItems() call is made.  The ref is updated
+ * synchronously, so every event handler always sees the latest data.
  */
 
-import React, { useCallback, useState, useMemo } from 'react';
+import React, { useCallback, useState, useMemo, useRef, useEffect } from 'react';
 import {
   DndContext,
   DragStartEvent,
@@ -21,12 +16,13 @@ import {
   DragEndEvent,
   closestCorners,
   PointerSensor,
+  KeyboardSensor,
   useSensor,
   useSensors,
   DragOverlay,
   UniqueIdentifier,
 } from '@dnd-kit/core';
-import { arrayMove } from '@dnd-kit/sortable';
+import { arrayMove, sortableKeyboardCoordinates } from '@dnd-kit/sortable';
 import { v4 as uuidv4 } from 'uuid';
 import { useBoardStore } from '../../store/boardStore';
 import { useWebSocket } from '../../hooks/useWebSocket';
@@ -37,6 +33,13 @@ import { ConnectionStatus } from '../ConnectionStatus/ConnectionStatus';
 import { ErrorBoundary } from '../ErrorBoundary/ErrorBoundary';
 import { ALL_COLUMNS, Column, Task } from '../../types';
 import { positionAtEnd, positionForIndex } from '../../lib/fractionalIndex';
+
+// Shape kept in ref so callbacks always see fresh values without re-creating
+interface DragState {
+  dragItems: Record<Column, Task[]> | null;
+  storeGroups: Record<Column, Task[]>;
+  tasks: Task[];
+}
 
 export function Board() {
   const { send } = useWebSocket();
@@ -55,16 +58,22 @@ export function Board() {
   } = useBoardStore();
 
   // ── Drag state ────────────────────────────────────────────────────────────
-  // `dragItems`: local snapshot of tasks-per-column updated on every onDragOver
-  // so cross-column moves are reflected visually before dragEnd.
   const [activeId, setActiveId] = useState<UniqueIdentifier | null>(null);
+  // `dragItems` state drives rendering; ref drives logic (no stale closures)
   const [dragItems, setDragItems] = useState<Record<Column, Task[]> | null>(null);
 
+  const dragStateRef = useRef<DragState>({
+    dragItems: null,
+    storeGroups: { todo: [], inprogress: [], done: [] },
+    tasks: [],
+  });
+
   const sensors = useSensors(
-    useSensor(PointerSensor, { activationConstraint: { distance: 4 } })
+    useSensor(PointerSensor, { activationConstraint: { distance: 5 } }),
+    useSensor(KeyboardSensor, { coordinateGetter: sortableKeyboardCoordinates })
   );
 
-  // ── Stable task groups from Zustand (used when not dragging) ─────────────
+  // ── Stable task groups from Zustand ───────────────────────────────────────
   const storeGroups = useMemo<Record<Column, Task[]>>(() => {
     const groups = {} as Record<Column, Task[]>;
     for (const col of ALL_COLUMNS) {
@@ -75,7 +84,19 @@ export function Board() {
     return groups;
   }, [tasks]);
 
-  // During drag use the local snapshot; otherwise use the store
+  // Keep ref in sync with the latest rendered values (runs after every render)
+  useEffect(() => {
+    dragStateRef.current.storeGroups = storeGroups;
+    dragStateRef.current.tasks = tasks;
+  });
+
+  // Helper: update both state (for rendering) and ref (for event handlers)
+  const applyDragItems = useCallback((v: Record<Column, Task[]> | null) => {
+    dragStateRef.current.dragItems = v;
+    setDragItems(v);
+  }, []);
+
+  // During drag show local snapshot; outside drag show store
   const displayGroups = dragItems ?? storeGroups;
 
   const activeTask = useMemo(
@@ -87,34 +108,34 @@ export function Board() {
   const handleCreateTask = useCallback(
     (columnId: Column) => {
       const tempId = `temp-${uuidv4()}`;
-      const colPositions = storeGroups[columnId].map((t) => t.position);
+      const colPositions = dragStateRef.current.storeGroups[columnId].map((t) => t.position);
       const position = positionAtEnd(colPositions);
       optimisticCreateTask(tempId, columnId, position);
       sendOrQueue('CREATE_TASK', {
         clientId, tempId, title: 'New Task', description: '', columnId, position,
       });
     },
-    [clientId, storeGroups, optimisticCreateTask, sendOrQueue]
+    [clientId, optimisticCreateTask, sendOrQueue]
   );
 
   const handleUpdateTask = useCallback(
     (taskId: string, changes: { title?: string; description?: string }) => {
-      const task = tasks.find((t) => t.id === taskId);
+      const task = dragStateRef.current.tasks.find((t) => t.id === taskId);
       if (!task) return;
       optimisticUpdateTask(taskId, changes);
       sendOrQueue('UPDATE_TASK', { clientId, taskId, baseVersion: task.version, changes });
     },
-    [clientId, tasks, optimisticUpdateTask, sendOrQueue]
+    [clientId, optimisticUpdateTask, sendOrQueue]
   );
 
   const handleDeleteTask = useCallback(
     (taskId: string) => {
-      const task = tasks.find((t) => t.id === taskId);
+      const task = dragStateRef.current.tasks.find((t) => t.id === taskId);
       if (!task) return;
       optimisticDeleteTask(taskId);
       sendOrQueue('DELETE_TASK', { clientId, taskId, baseVersion: task.version });
     },
-    [clientId, tasks, optimisticDeleteTask, sendOrQueue]
+    [clientId, optimisticDeleteTask, sendOrQueue]
   );
 
   const handlePresence = useCallback(
@@ -126,132 +147,125 @@ export function Board() {
   );
 
   // ── DnD: start ────────────────────────────────────────────────────────────
-  const handleDragStart = useCallback(
-    ({ active }: DragStartEvent) => {
-      setActiveId(active.id);
-      setDragItems({
-        todo: [...storeGroups.todo],
-        inprogress: [...storeGroups.inprogress],
-        done: [...storeGroups.done],
-      });
-    },
-    [storeGroups]
-  );
+  const handleDragStart = useCallback(({ active }: DragStartEvent) => {
+    const { storeGroups: sg } = dragStateRef.current;
+    const snapshot: Record<Column, Task[]> = {
+      todo:       [...sg.todo],
+      inprogress: [...sg.inprogress],
+      done:       [...sg.done],
+    };
+    setActiveId(active.id);
+    applyDragItems(snapshot);
+  }, [applyDragItems]);
 
-  // ── DnD: over (visual feedback) ───────────────────────────────────────────
-  const handleDragOver = useCallback(
-    ({ active, over }: DragOverEvent) => {
-      if (!over || !dragItems) return;
+  // ── DnD: over (visual feedback — uses ref to avoid stale closure) ─────────
+  const handleDragOver = useCallback(({ active, over }: DragOverEvent) => {
+    const current = dragStateRef.current.dragItems;
+    if (!over || !current) return;
 
-      const activeIdStr = String(active.id);
-      const overIdStr = String(over.id);
+    const activeIdStr = String(active.id);
+    const overIdStr   = String(over.id);
 
-      // Source column
-      const sourceCol = (ALL_COLUMNS).find((col) =>
-        dragItems[col].some((t) => t.id === activeIdStr)
-      );
-      if (!sourceCol) return;
+    // Find the column that currently holds the dragged task
+    const sourceCol = ALL_COLUMNS.find((col) =>
+      current[col].some((t) => t.id === activeIdStr)
+    );
+    if (!sourceCol) return;
 
-      // Target column: column droppable or the column containing the hovered task
-      const targetCol = (ALL_COLUMNS as string[]).includes(overIdStr)
-        ? (overIdStr as Column)
-        : (ALL_COLUMNS).find((col) => dragItems[col].some((t) => t.id === overIdStr));
+    // Target is either a column droppable (id === column name) or the column
+    // that contains the task being hovered over
+    const targetCol: Column | undefined = (ALL_COLUMNS as string[]).includes(overIdStr)
+      ? (overIdStr as Column)
+      : ALL_COLUMNS.find((col) => current[col].some((t) => t.id === overIdStr));
 
-      if (!targetCol) return;
+    if (!targetCol) return;
 
-      if (sourceCol === targetCol) {
-        // Same-column reorder — dnd-kit SortableContext handles visual transforms automatically
-        const colTasks = dragItems[sourceCol];
-        const oldIdx = colTasks.findIndex((t) => t.id === activeIdStr);
-        const newIdx = colTasks.findIndex((t) => t.id === overIdStr);
-        if (oldIdx < 0 || newIdx < 0 || oldIdx === newIdx) return;
-        setDragItems({
-          ...dragItems,
-          [sourceCol]: arrayMove(colTasks, oldIdx, newIdx),
-        });
-        return;
-      }
+    if (sourceCol === targetCol) {
+      // Same-column reorder
+      const colTasks = current[sourceCol];
+      const oldIdx = colTasks.findIndex((t) => t.id === activeIdStr);
+      const newIdx = colTasks.findIndex((t) => t.id === overIdStr);
+      if (oldIdx < 0 || newIdx < 0 || oldIdx === newIdx) return;
+      applyDragItems({ ...current, [sourceCol]: arrayMove(colTasks, oldIdx, newIdx) });
+      return;
+    }
 
-      // Cross-column move
-      const movedTask = dragItems[sourceCol].find((t) => t.id === activeIdStr)!;
-      const newSource = dragItems[sourceCol].filter((t) => t.id !== activeIdStr);
-      const newTarget = [...dragItems[targetCol]];
-      const overIdx = newTarget.findIndex((t) => t.id === overIdStr);
-      if (overIdx >= 0) {
-        newTarget.splice(overIdx, 0, { ...movedTask, columnId: targetCol });
-      } else {
-        newTarget.push({ ...movedTask, columnId: targetCol });
-      }
+    // Cross-column move
+    const movedTask = current[sourceCol].find((t) => t.id === activeIdStr)!;
+    const newSource = current[sourceCol].filter((t) => t.id !== activeIdStr);
+    const newTarget = [...current[targetCol]];
+    const overIdx = newTarget.findIndex((t) => t.id === overIdStr);
+    if (overIdx >= 0) {
+      newTarget.splice(overIdx, 0, { ...movedTask, columnId: targetCol });
+    } else {
+      newTarget.push({ ...movedTask, columnId: targetCol });
+    }
 
-      setDragItems({ ...dragItems, [sourceCol]: newSource, [targetCol]: newTarget });
-    },
-    [dragItems]
-  );
+    applyDragItems({ ...current, [sourceCol]: newSource, [targetCol]: newTarget });
+  }, [applyDragItems]);
 
-  // ── DnD: end (commit) ─────────────────────────────────────────────────────
-  const handleDragEnd = useCallback(
-    ({ active }: DragEndEvent) => {
-      const activeIdStr = String(active.id);
-      const originalTask = tasks.find((t) => t.id === activeIdStr);
+  // ── DnD: end (commit) — uses ref for all mutable values ──────────────────
+  const handleDragEnd = useCallback(({ active }: DragEndEvent) => {
+    const { dragItems: di, storeGroups: sg, tasks: ts } = dragStateRef.current;
 
-      if (!dragItems || !originalTask) {
-        setActiveId(null);
-        setDragItems(null);
-        return;
-      }
+    const activeIdStr  = String(active.id);
+    const originalTask = ts.find((t) => t.id === activeIdStr);
 
-      // Final column where the task landed
-      const finalCol = (ALL_COLUMNS).find((col) =>
-        dragItems[col].some((t) => t.id === activeIdStr)
-      );
-
-      if (!finalCol) {
-        setActiveId(null);
-        setDragItems(null);
-        return;
-      }
-
-      const finalColTasks = dragItems[finalCol];
-      const insertIndex = finalColTasks.findIndex((t) => t.id === activeIdStr);
-
-      // Positions of the OTHER tasks in the final column (from original store, not dragItems,
-      // to avoid using the already-moved optimistic values)
-      const othersPositions = storeGroups[finalCol]
-        .filter((t) => t.id !== activeIdStr)
-        .map((t) => t.position);
-
-      // Clamp insertIndex to valid range for othersPositions
-      const posIdx = Math.max(0, Math.min(insertIndex, othersPositions.length));
-      const newPosition = positionForIndex(othersPositions, posIdx);
-
-      // No-op if nothing changed
-      const sameColumn = finalCol === originalTask.columnId;
-      const samePosition = Math.abs(newPosition - originalTask.position) < 0.001;
-      if (sameColumn && samePosition) {
-        setActiveId(null);
-        setDragItems(null);
-        return;
-      }
-
-      optimisticMoveTask(activeIdStr, finalCol, newPosition);
-      sendOrQueue('MOVE_TASK', {
-        clientId,
-        taskId: activeIdStr,
-        baseVersion: originalTask.version,
-        columnId: finalCol,
-        position: newPosition,
-      });
-
+    if (!di || !originalTask) {
       setActiveId(null);
-      setDragItems(null);
-    },
-    [activeId, dragItems, tasks, storeGroups, clientId, optimisticMoveTask, sendOrQueue]
-  );
+      applyDragItems(null);
+      return;
+    }
+
+    // Column where the task ended up after all onDragOver moves
+    const finalCol = ALL_COLUMNS.find((col) =>
+      di[col].some((t) => t.id === activeIdStr)
+    );
+
+    if (!finalCol) {
+      setActiveId(null);
+      applyDragItems(null);
+      return;
+    }
+
+    const finalColTasks = di[finalCol];
+    const insertIndex   = finalColTasks.findIndex((t) => t.id === activeIdStr);
+
+    // Compute new fractional position from original store positions
+    // (avoids using already-mutated optimistic values)
+    const othersPositions = sg[finalCol]
+      .filter((t) => t.id !== activeIdStr)
+      .map((t) => t.position);
+
+    const posIdx      = Math.max(0, Math.min(insertIndex, othersPositions.length));
+    const newPosition = positionForIndex(othersPositions, posIdx);
+
+    // No-op if nothing actually changed
+    const sameColumn   = finalCol === originalTask.columnId;
+    const samePosition = Math.abs(newPosition - originalTask.position) < 0.001;
+    if (sameColumn && samePosition) {
+      setActiveId(null);
+      applyDragItems(null);
+      return;
+    }
+
+    optimisticMoveTask(activeIdStr, finalCol, newPosition);
+    sendOrQueue('MOVE_TASK', {
+      clientId,
+      taskId:      activeIdStr,
+      baseVersion: originalTask.version,
+      columnId:    finalCol,
+      position:    newPosition,
+    });
+
+    setActiveId(null);
+    applyDragItems(null);
+  }, [clientId, optimisticMoveTask, sendOrQueue, applyDragItems]);
 
   const handleDragCancel = useCallback(() => {
     setActiveId(null);
-    setDragItems(null);
-  }, []);
+    applyDragItems(null);
+  }, [applyDragItems]);
 
   // ─────────────────────────────────────────────────────────────────────────
   return (
@@ -298,8 +312,8 @@ export function Board() {
                 isActiveDropTarget={
                   activeId !== null &&
                   dragItems !== null &&
-                  dragItems[col].some((t) => t.id === activeId) &&
-                  storeGroups[col].every((t) => t.id !== activeId)
+                  dragItems[col].some((t) => t.id === String(activeId)) &&
+                  storeGroups[col].every((t) => t.id !== String(activeId))
                 }
                 onCreateTask={handleCreateTask}
                 onUpdateTask={handleUpdateTask}
