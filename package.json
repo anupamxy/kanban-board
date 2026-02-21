@@ -1,0 +1,12 @@
+{
+  "name": "kanban-monorepo",
+  "version": "1.0.0",
+  "private": true,
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "build": "npm install --prefix frontend && npm run build --prefix frontend && npm install --prefix backend && npm run build --prefix backend && mkdir -p backend/dist/public && cp -r frontend/dist/. backend/dist/public",
+    "start": "node backend/dist/index.js"
+  }
+}

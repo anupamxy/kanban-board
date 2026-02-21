@@ -3,14 +3,8 @@ services:
     name: kanban-app
     env: node
     plan: free
-    buildCommand: >-
-      npm install --prefix frontend &&
-      npm run build --prefix frontend &&
-      npm install --prefix backend &&
-      npm run build --prefix backend &&
-      mkdir -p backend/dist/public &&
-      cp -r frontend/dist/. backend/dist/public
-    startCommand: node backend/dist/index.js
+    buildCommand: npm install && npm run build
+    startCommand: npm start
     envVars:
       - key: NODE_ENV
         value: production
