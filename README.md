@@ -85,11 +85,11 @@ npm test            # Jest: integration + unit tests
 
 ## Deployment
 
-**Live URL:** *(Add after deploying to Railway/Render)*
+**Live URL:** [https://kanban-app-yflm.onrender.com](https://kanban-app-yflm.onrender.com)
 
-The app is deployed with:
-- **Backend + Database**: Railway (WebSockets supported natively)
-- **Frontend**: Railway static or Netlify
+The app is deployed as a single service on Render with:
+- **Backend + Frontend**: Render web service (Node.js serves the built React app)
+- **Database**: Render managed PostgreSQL
 
 ### Cold Start
 Free-tier containers may sleep after 15 min of inactivity. First request after cold start takes **~5–10 seconds**. The frontend shows a "Reconnecting…" indicator while the WebSocket re-establishes.
