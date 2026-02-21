@@ -126,9 +126,16 @@ export const useBoardStore = create<BoardState>((set, get) => ({
   },
 
   confirmTaskCreated: (task, tempId) =>
-    set((s) => ({
-      tasks: s.tasks.map((t) => (t.id === tempId ? { ...task, isOptimistic: false } : t)),
-    })),
+    set((s) => {
+      const hasTemp = s.tasks.some((t) => t.id === tempId);
+      if (hasTemp) {
+        // Our own optimistic placeholder — replace it with the real task
+        return { tasks: s.tasks.map((t) => (t.id === tempId ? { ...task, isOptimistic: false } : t)) };
+      }
+      // Task created by another user — add it if not already present
+      if (s.tasks.some((t) => t.id === task.id)) return s;
+      return { tasks: [...s.tasks, { ...task, isOptimistic: false }] };
+    }),
 
   // ── Optimistic updates ──────────────────────────────────────────────────
   optimisticUpdateTask: (taskId, changes) =>
@@ -139,9 +146,11 @@ export const useBoardStore = create<BoardState>((set, get) => ({
     })),
 
   confirmTaskUpdated: (task) =>
-    set((s) => ({
-      tasks: s.tasks.map((t) => (t.id === task.id ? { ...task, isOptimistic: false } : t)),
-    })),
+    set((s) => {
+      const exists = s.tasks.some((t) => t.id === task.id);
+      if (!exists) return { tasks: [...s.tasks, { ...task, isOptimistic: false }] };
+      return { tasks: s.tasks.map((t) => (t.id === task.id ? { ...task, isOptimistic: false } : t)) };
+    }),
 
   // ── Optimistic moves ────────────────────────────────────────────────────
   optimisticMoveTask: (taskId, columnId, position) =>
@@ -152,9 +161,11 @@ export const useBoardStore = create<BoardState>((set, get) => ({
     })),
 
   confirmTaskMoved: (task) =>
-    set((s) => ({
-      tasks: s.tasks.map((t) => (t.id === task.id ? { ...task, isOptimistic: false } : t)),
-    })),
+    set((s) => {
+      const exists = s.tasks.some((t) => t.id === task.id);
+      if (!exists) return { tasks: [...s.tasks, { ...task, isOptimistic: false }] };
+      return { tasks: s.tasks.map((t) => (t.id === task.id ? { ...task, isOptimistic: false } : t)) };
+    }),
 
   // ── Optimistic deletes ──────────────────────────────────────────────────
   optimisticDeleteTask: (taskId) =>

@@ -1,4 +1,4 @@
-import React, { useCallback } from 'react';
+import React from 'react';
 import {
   SortableContext,
   verticalListSortingStrategy,
@@ -12,22 +12,24 @@ interface Props {
   columnId: ColumnType;
   tasks: Task[];
   presence: PresenceUser[];
+  isActiveDropTarget: boolean;
   onCreateTask: (columnId: ColumnType) => void;
   onUpdateTask: (taskId: string, changes: { title?: string; description?: string }) => void;
   onDeleteTask: (taskId: string) => void;
   onPresence: (viewingTask?: string, editingTask?: string) => void;
 }
 
-const COLUMN_COLORS: Record<ColumnType, { header: string; bg: string; badge: string }> = {
-  todo:       { header: '#6366f1', bg: '#f5f5ff', badge: '#e0e7ff' },
-  inprogress: { header: '#f59e0b', bg: '#fffbeb', badge: '#fef3c7' },
-  done:       { header: '#22c55e', bg: '#f0fdf4', badge: '#dcfce7' },
+const COLUMN_COLORS: Record<ColumnType, { header: string; bg: string; badge: string; dropBg: string }> = {
+  todo:       { header: '#6366f1', bg: '#f5f5ff', badge: '#e0e7ff', dropBg: '#ede9fe' },
+  inprogress: { header: '#f59e0b', bg: '#fffbeb', badge: '#fef3c7', dropBg: '#fef3c7' },
+  done:       { header: '#22c55e', bg: '#f0fdf4', badge: '#dcfce7', dropBg: '#d1fae5' },
 };
 
-export function Column({
+export function ColumnComponent({
   columnId,
   tasks,
   presence,
+  isActiveDropTarget,
   onCreateTask,
   onUpdateTask,
   onDeleteTask,
@@ -37,8 +39,16 @@ export function Column({
   const colors = COLUMN_COLORS[columnId];
   const sorted = [...tasks].sort((a, b) => a.position - b.position);
 
+  const bgColor = isOver || isActiveDropTarget ? colors.dropBg : colors.bg;
+  const borderStyle = isOver || isActiveDropTarget
+    ? `2px solid ${colors.header}`
+    : '2px solid transparent';
+
   return (
-    <div style={{ ...styles.column, background: isOver ? '#f0f4ff' : colors.bg }}>
+    <div
+      ref={setNodeRef}
+      style={{ ...styles.column, background: bgColor, border: borderStyle }}
+    >
       {/* Header */}
       <div style={{ ...styles.header, borderBottom: `3px solid ${colors.header}` }}>
         <span style={styles.title}>{COLUMN_LABELS[columnId]}</span>
@@ -47,8 +57,8 @@ export function Column({
         </span>
       </div>
 
-      {/* Task list — droppable */}
-      <div ref={setNodeRef} style={styles.taskList}>
+      {/* Task list */}
+      <div style={styles.taskList}>
         <ErrorBoundary context={`column-${columnId}`}>
           <SortableContext
             items={sorted.map((t) => t.id)}
@@ -93,7 +103,7 @@ const styles: Record<string, React.CSSProperties> = {
     display: 'flex',
     flexDirection: 'column',
     gap: '8px',
-    transition: 'background 0.15s',
+    transition: 'background 0.15s, border-color 0.15s',
   },
   header: {
     display: 'flex',
@@ -111,14 +121,14 @@ const styles: Record<string, React.CSSProperties> = {
   },
   taskList: {
     flex: 1,
-    minHeight: '80px',
+    minHeight: '120px',
     overflowY: 'auto',
   },
   empty: {
     textAlign: 'center',
     color: '#d1d5db',
     fontSize: '13px',
-    padding: '24px 0',
+    padding: '32px 0',
     userSelect: 'none',
   },
   addBtn: {
